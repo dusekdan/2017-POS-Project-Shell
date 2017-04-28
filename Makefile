@@ -5,7 +5,6 @@ TARGET = project.c
 
 all:
 	gcc -ansi -pedantic -Wall $(TARGET) -o project -lpthread -O -g
-	@#rm project
 
 clean:
 	rm project

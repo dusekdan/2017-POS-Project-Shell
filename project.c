@@ -2,6 +2,7 @@
 #define _XOPEN_SOURCE 500
 #define _XOPEN_SOURCE_EXTENDED 1
 
+
 #define BUFFER_SIZE 513
 #define BUFFER_LAST_INDEX 512
 
@@ -12,6 +13,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <unistd.h> /* read and write functions */
+#include <ctype.h>
 #include <sys/wait.h>
 #include <fcntl.h>
 
@@ -22,6 +24,10 @@
 void *readInput(void * data);
 void *executeCommand(void * data);
 
+void preventViolentTermination(int source);
+void killKid(int source);
+
+int isEmptyHit(char* str);
 void printShellHud();
 void flushStdin();
 
@@ -45,6 +51,8 @@ int main (int argc, char** argv)
 {
 	pthread_t readThread;
 	pthread_t executeThread;
+
+	signal (SIGINT, &preventViolentTermination);
 
 	/* Shared buffer pre-allocation */
 	sharedBuffer = (char*)  malloc (BUFFER_SIZE * sizeof (char));
@@ -73,15 +81,14 @@ void *readInput(void * data)
 	/* As long as program is running, read commands */
 	while (1)
 	{
-		printShellHud();	/* Displays ddsh> for user and flushes stdout */
+		/* Displays ddsh> for user and flushes stdout */
+		printShellHud();	
 		
 		memset(inputData, '\0', BUFFER_SIZE);
-
 		inputLength = read(0, inputData, 513);
 		
 		/* Required null termination for every input string */
 		inputData[512] = '\0';
-
 
 		/* 
 			Note that also '\n' character is read - you can enter only 511 characters, 512th will be \n (and should  be) 
@@ -89,16 +96,10 @@ void *readInput(void * data)
 		*/
 		if (inputLength == 513)	
 		{
-			fprintf (stderr, "I'm not your friend, mate. Input is too long (MAX_BUFF_SIZE=512)\n");
+			fprintf (stderr, "Shell buffer size exceeded. (MAX_BUFF_SIZE = 512) \n");
 			flushStdin();
 			continue;
 		}
-
-		/*
-			Get rid of just empty line hits and 
-		*/
-
-
 
 		/* Right here I have string from input read to inputData variable, and I will copy it to sharedBuffer (mutex lock required) */
 		pthread_mutex_lock(&bufferAccessMutex);
@@ -109,23 +110,14 @@ void *readInput(void * data)
 		/* Tell thread #2 that sharedBuffer is ready */
 		pthread_cond_signal(&bufferReady1);
 
+		if (DEBUG)
+			printf("D:Read vlákno èeká na signál.\n");
+
 		/* Wait for execution thread to do its work */
-		printf("DRead vlÃ¡kno ÄekÃ¡ na signÃ¡l.\n");
 		pthread_cond_wait(&bufferReady2, &dummyMutex1);
 
-		/* Terminate loop when user tries to exit, strcspn count number of character before it hits \r\n || \n || \0...*/
-		/*if (strcmp(inputData[strcspn(inputData, "\r\n")], "exit") == 0)
-			break; // TODO: Move this to execute routine*/
-
-		/* ALL THAT HAPPENS HERE IS HAPPENING AFTER EXECUTIONER DOES HIS WORK */
-
-		/*printf("Vypisuji: ");
-		printf ("%s", sharedBuffer);
-		printf("\n");*/
 	}
 	
-
-	/*printf("[R] Exited");*/
 	pthread_exit(NULL);
 }
 
@@ -139,8 +131,8 @@ void *executeCommand(void * data)
 
 	while (1)
 	{
-		char* outFDName;
-		char* inFDName;
+		char* outFDName = NULL;
+		char* inFDName = NULL;
 		int   outFD;
 		int   inFD;
 
@@ -157,11 +149,13 @@ void *executeCommand(void * data)
 		int argcout = 1;
 	    int isFileName = 0;
 
+		if (DEBUG)
+			printf("D: Execute vlákno èeká na signál.\n");
+		
 		/* 
 			Wait until signaled by reading thread, then acquire mutex 
 			Signaling thread should unlock bufferMutex before signaling
 		*/
-		printf("D: Execute vlÃ¡kno ÄekÃ¡ na signÃ¡l.\n");
 		pthread_cond_wait(&bufferReady1, &dummyMutex2);
 
 		/* Get rid of trailing \n */
@@ -174,8 +168,16 @@ void *executeCommand(void * data)
 			printf ("Exiting...\n");
 			exit (0);
 		}
-		
-		printf ("E: Received signal, buffer-contents: %s\n", sharedBuffer);
+		/* Make empty hits more shell-like (and certainly great again!) */
+		else if (isEmptyHit(sharedBuffer))
+		{
+			pthread_cond_signal(&bufferReady2);
+			continue;
+		}
+
+
+		if (DEBUG)
+			printf ("E: Received signal, buffer-contents: %s\n", sharedBuffer);
 
 		/* 
 		Standard case - only ./program [anything] || nothing cases are handled here
@@ -193,10 +195,12 @@ void *executeCommand(void * data)
 				firstparam = 0;
 			}
 
-			/* Also maybe handle > and < */
+			/* Also handle > and < prefixed or suffixed by SPACE */
 			if (strlen(token) == 1 && strcmp(token, ">") == 0)
 			{
-				printf("\nWATCH OUT, FILE NAME TO BE EXPECTED\n");
+				if (DEBUG)
+					printf("\nWATCH OUT, FILE NAME TO BE EXPECTED\n");
+				
 				/* Raise flag and continue */
 				isFileName = 1;
 				token = strtok(NULL, " ");
@@ -204,7 +208,9 @@ void *executeCommand(void * data)
 			}
 			else if (strlen(token) == 1 && strcmp(token, "<") == 0)
 			{
-				printf("\nInput filename to be expected\n");
+				if (DEBUG)
+					printf("\nInput filename to be expected\n");
+				
 				/* Raise flag and continue */
 				isFileName = 2;
 				token = strtok(NULL, " ");
@@ -213,29 +219,32 @@ void *executeCommand(void * data)
 
 			if (isFileName == 1)
 			{
-
 				/* Reset flag back and jump to forking part with proper dup() call*/
 				outFDName = (char*) malloc(strlen(token)*sizeof(char));
 				memcpy(outFDName, token, strlen(token));
-				printf("FILENAME: %s\n",  outFDName);
+				
+				if (DEBUG)
+					printf("FILENAME: %s\n",  outFDName);
+				
 				token = NULL;
 				isFileName = 1;
 				continue;
 			}
 			else if (isFileName == 2)
 			{
-
 				/* Reset flag back and jump to forking part with proper dup() call*/
 				inFDName = (char*) malloc(strlen(token)*sizeof(char));
 				memcpy(inFDName, token, strlen(token));
-				printf("FILENAME: %s\n", inFDName);
+			
+				if (DEBUG)
+					printf("FILENAME: %s\n", inFDName);
+			
 				token = NULL;
 				isFileName = 2;
 				continue;
 			}
 		
 			tempArgs = (char**) realloc(arguments, (sizeof(char *) * argcout));
-			/*memset(tempArgs, '\0', sizeof(char*)*argcout);*/
 			arguments = tempArgs;
 
 			tmpArgument = (char*) realloc(argument, (strlen(token)+1) * sizeof(char));
@@ -300,12 +309,19 @@ void *executeCommand(void * data)
 					}
 				}
 
+				/* Prepare kid for suicide before making him other process */
+				signal(SIGINT, &killKid);
+				
 				if (execvp(programName, arguments) < 0) 
 				{
 					int err = errno;
 					if (err == 2)
 					{
 						fprintf(stderr, "Command not supported.\n");
+					}
+					else if (err == 36)
+					{
+						fprintf(stderr, "Command not supported. And also is too long for execvp() to handle.\n");
 					}
 					else
 					{
@@ -314,16 +330,11 @@ void *executeCommand(void * data)
 					exit(1);
 				}
 
-
 				exit(0);
 			}
 			wait(NULL);
 		}
 		
-
-
-		
-
 
 		/* Releasing mutex & signaling the other thread */
 		pthread_cond_signal(&bufferReady2);
@@ -353,7 +364,53 @@ void flushStdin()
 {
 	int c;
 	while ((c = getchar()) != '\n');
-	/*int c;
-	while ((c = getchar()) != '\n' ||  c != EOF);	Loops until EOL or EOF is hit 
-	*/
+}
+
+/**
+ * Handles violent script termination (for now, only CTRL+C type of signal)
+ */
+void preventViolentTermination(int source)
+{
+	if (source == SIGINT)
+	{
+		/* Ensure following CTRL+C presses are also caught */
+		signal(SIGINT, &preventViolentTermination);
+		
+		printf ("\tKilling kids...\n");
+		
+		/* Make the shell to prompt again */
+		printShellHud();
+		/* 
+			Known issue: Sometimes the shell prompt displays twice, but I figured
+		   that it's better to display it twice than to not display it at all 
+		   */
+	}
+}
+
+/**
+ * Signal handler for children processes
+ * Kills the process, does not print anything, though.
+ */
+void killKid(int source)
+{
+	if (source == SIGINT)
+	{
+		exit(0);
+	}
+}
+
+/**
+ * Checks whether string is whitespace(s) only
+ */
+int isEmptyHit(char* str)
+{
+	int i = 0;
+	while(str[i] != '\0')
+	{
+		if (!isspace(str[i]))
+			return 0;
+		i++;
+	}
+
+	return 1;
 }
