@@ -7,7 +7,8 @@ all:
 	gcc -ansi -pedantic -Wall $(TARGET) -o project -lpthread -O -g
 
 clean:
-	rm project
+	rm -f project
+	rm -f *~
 
 
 

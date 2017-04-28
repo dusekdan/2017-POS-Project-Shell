@@ -1,32 +1,26 @@
 #define _POSIX_C_SOURCE 199506L
 #define _XOPEN_SOURCE 500
 #define _XOPEN_SOURCE_EXTENDED 1
-
-
 #define BUFFER_SIZE 513
 #define BUFFER_LAST_INDEX 512
-
+#define DEBUG 0
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <time.h>
-#include <unistd.h> /* read and write functions */
+#include <signal.h>
+#include <unistd.h> 
 #include <ctype.h>
 #include <sys/wait.h>
 #include <fcntl.h>
-
 #include <errno.h>
-
-#define DEBUG 0
 
 void *readInput(void * data);
 void *executeCommand(void * data);
-
 void preventViolentTermination(int source);
 void killKid(int source);
-
 int isEmptyHit(char* str);
 void printShellHud();
 void flushStdin();
@@ -34,14 +28,12 @@ void flushStdin();
 char* sharedBuffer;
 
 pthread_mutex_t bufferAccessMutex = PTHREAD_MUTEX_INITIALIZER;
-
 pthread_mutex_t dummyMutex1 = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t dummyMutex2 = PTHREAD_MUTEX_INITIALIZER;
 
-
-
 pthread_cond_t bufferReady1 = PTHREAD_COND_INITIALIZER;
 pthread_cond_t bufferReady2 = PTHREAD_COND_INITIALIZER;
+
 
 /**
  * Application entry point
@@ -60,30 +52,49 @@ int main (int argc, char** argv)
 	pthread_create(&readThread, NULL, readInput,  (void *)(intptr_t)(1));
 	pthread_create(&executeThread, NULL, executeCommand,  (void *)(intptr_t)(2));
 
-
-
 	/* Clean up threads */
 	pthread_join (readThread, NULL);
 	pthread_join (executeThread, NULL);
 
-	/* Clean up mutexes */
+	/* Clean up mutexes and conditional variables */
 	pthread_mutex_destroy(&bufferAccessMutex);
+	pthread_mutex_destroy(&dummyMutex1);
+	pthread_mutex_destroy(&dummyMutex2);
+	pthread_cond_destroy(&bufferReady1);
+	pthread_cond_destroy(&bufferReady2);
+	
+	/* Exit main thread properly */
 	return 0;
 }
 
+
+/**
+ * Routine for input reading thread
+ */
 void *readInput(void * data)
 {
-	/*long tid = (intptr_t) data;	For now passing only ID */
-
 	int inputLength;
+	int firstRun = 1;
 	char inputData[BUFFER_SIZE];
 
 	/* As long as program is running, read commands */
 	while (1)
 	{
 		/* Displays ddsh> for user and flushes stdout */
+		
+		if (firstRun)
+		{
+			printf ("Author: Daniel Dusek, xdusek21@vutbr.cz\n");
+			printf ("CHYBEJICI FUNKCIONALITA: Spusteni procesu na pozadi\n");
+			printf ("ZNAME PROBLEMY: Presmerovani vstupu a vystupu (<,>) potrebuje mezeru pred a po svem vyskytu.\n");
+			printf ("\tUkonceni programu: exit\n");
+			firstRun = 0;
+		}
+
 		printShellHud();	
 		
+
+
 		memset(inputData, '\0', BUFFER_SIZE);
 		inputLength = read(0, inputData, 513);
 		
@@ -115,12 +126,10 @@ void *readInput(void * data)
 
 		/* Wait for execution thread to do its work */
 		pthread_cond_wait(&bufferReady2, &dummyMutex1);
-
 	}
 	
 	pthread_exit(NULL);
 }
-
 
 
 /**
